@@ -4,11 +4,10 @@ from flask import Flask, request, jsonify
 import numpy as np
 from deepface import DeepFace
 from PIL import Image
-import shutil  # For potential file operations if needed
+import shutil 
 
 app = Flask(__name__)
 
-# Base directory for user images
 IMAGES_BASE_DIR = "images"
 
 class SimpleFacerec:
@@ -25,7 +24,6 @@ class SimpleFacerec:
         return img_path
 
     def load_encoding_images(self, images_path):
-        # Clear previous encodings
         self.known_face_encodings = []
         self.known_face_names = []
         
@@ -50,7 +48,6 @@ class SimpleFacerec:
                 self.known_face_names.append(filename)
                 print(f"[INFO] Loaded encoding for {filename}")
                 
-                # Clean up temp file if created
                 if safe_img != img_path:
                     os.remove(safe_img)
             except Exception as e:
@@ -66,8 +63,6 @@ class SimpleFacerec:
             )[0]["embedding"]
 
             query_encoding = np.array(embedding)
-            
-            # Clean up temp file if created
             if safe_img != query_img_path:
                 os.remove(safe_img)
 
@@ -97,17 +92,15 @@ class SimpleFacerec:
         else:
             return "Unknown"
 
-# Helper function to ensure user directory exists
 def ensure_user_dir(username):
     user_dir = os.path.join(IMAGES_BASE_DIR, username)
     os.makedirs(user_dir, exist_ok=True)
     return user_dir
 
-# Endpoint to add a person (store image)
 @app.route('/add_person', methods=['POST'])
 def add_person():
     username = request.form.get('username')
-    person_name = request.form.get('person_name')  # The name to save as filename (e.g., "Alice")
+    person_name = request.form.get('person_name')
     if not username or not person_name:
         return jsonify({"error": "Username and person_name required"}), 400
     
@@ -115,30 +108,26 @@ def add_person():
     if not image:
         return jsonify({"error": "Image required"}), 400
     
-    # Ensure user directory exists
     user_dir = ensure_user_dir(username)
     
-    # Save image as {person_name}.jpg in user folder
     image_path = os.path.join(user_dir, f"{person_name}.jpg")
     
-    # Handle if it's webp or other, convert to jpg
     if image.filename.lower().endswith(".webp"):
         pil_image = Image.open(image.stream).convert("RGB")
         pil_image.save(image_path)
     else:
         image.save(image_path)
     
-    # Optionally, you can trigger reloading encodings here, but better to load on-demand in recognize
+    
     return jsonify({
         "success": True, 
         "message": f"Image for {person_name} added to {username}'s folder",
         "image_path": image_path
     })
 
-# Endpoint to delete a person (remove image)
 @app.route('/delete_person', methods=['DELETE'])
 def delete_person():
-    username = request.form.get('username')  # For DELETE, use form data or JSON
+    username = request.form.get('username')  
     person_name = request.form.get('person_name')
     if not username or not person_name:
         return jsonify({"error": "Username and person_name required"}), 400
@@ -157,7 +146,6 @@ def delete_person():
     else:
         return jsonify({"error": "Image not found"}), 404
 
-# Endpoint for recognition (detection)
 @app.route('/recognize', methods=['POST'])
 def recognize():
     username = request.form.get('username')
@@ -168,25 +156,21 @@ def recognize():
     if not image:
         return jsonify({"error": "Image required"}), 400
 
-    # Ensure user directory exists (though it should for recognition)
     user_dir = ensure_user_dir(username)
     
-    # Save temp query image
+
     temp_image_path = f"temp_{username}.jpg"
     if image.filename.lower().endswith(".webp"):
         pil_image = Image.open(image.stream).convert("RGB")
         pil_image.save(temp_image_path)
     else:
         image.save(temp_image_path)
-
-    # Load encodings from user's folder
+        
     sfr = SimpleFacerec()
     sfr.load_encoding_images(user_dir)
-    
-    # Match
+
     match = sfr.match_image(temp_image_path, tolerance=0.45)
-    
-    # Clean up temp
+
     os.remove(temp_image_path)
     
     if match == "Unknown":
