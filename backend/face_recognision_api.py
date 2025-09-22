@@ -1,20 +1,26 @@
 import os
-import glob
-from flask import Flask, request, jsonify
+import tempfile
+import base64
+import requests
+from flask import Flask, request, jsonify, render_template
 import numpy as np
 from deepface import DeepFace
 from PIL import Image
-import shutil 
 
 app = Flask(__name__)
-
-IMAGES_BASE_DIR = "images"
 
 class SimpleFacerec:
     def __init__(self, model_name="ArcFace"):
         self.known_face_encodings = []
-        self.known_face_names = []
+        self.known_face_data = []
         self.model_name = model_name
+
+    def _save_base64_image(self, base64_str):
+        img_data = base64.b64decode(base64_str)
+        tmp_file = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tmp_file.write(img_data)
+        tmp_file.close()
+        return tmp_file.name
 
     def _safe_path(self, img_path):
         if img_path.lower().endswith(".webp"):
@@ -23,35 +29,33 @@ class SimpleFacerec:
             return temp_path
         return img_path
 
-    def load_encoding_images(self, images_path):
-        self.known_face_encodings = []
-        self.known_face_names = []
-        
-        images = glob.glob(os.path.join(images_path, "*"))
-        print(f"{len(images)} images found in {images_path}")
+    def add_member(self, member):
+        try:
+            img_path = self._save_base64_image(member['memberImage'])
+            safe_img = self._safe_path(img_path)
 
-        for img_path in images:
-            basename = os.path.basename(img_path)
-            filename, _ = os.path.splitext(basename)
+            embedding = DeepFace.represent(
+                img_path=safe_img,
+                model_name=self.model_name,
+                enforce_detection=False
+            )[0]["embedding"]
 
-            try:
-                safe_img = self._safe_path(img_path)
-                embedding = DeepFace.represent(
-                    img_path=safe_img,
-                    model_name=self.model_name,
-                    enforce_detection=False
-                )[0]["embedding"]
+            embedding = np.array(embedding)
+            self.known_face_encodings.append(embedding)
+            self.known_face_data.append({
+                "memberName": member.get("memberName"),
+                "memberRelation": member.get("memberRelation"),
+                "memberImage": member.get("memberImage")
+            })
 
-                embedding = np.array(embedding) 
+            if safe_img != img_path:
+                os.remove(safe_img)
+            os.remove(img_path)
 
-                self.known_face_encodings.append(embedding)
-                self.known_face_names.append(filename)
-                print(f"[INFO] Loaded encoding for {filename}")
-                
-                if safe_img != img_path:
-                    os.remove(safe_img)
-            except Exception as e:
-                print(f"[WARNING] Could not encode {filename}: {e}")
+            return True
+        except Exception as e:
+            print(f"[WARNING] Could not encode member {member.get('memberName')}: {e}")
+            return False
 
     def match_image(self, query_img_path, tolerance=0.45):
         try:
@@ -68,11 +72,11 @@ class SimpleFacerec:
 
         except Exception as e:
             print(f"[ERROR] Could not process query image: {e}")
-            return "Unknown"
+            return None, None
 
         if not self.known_face_encodings:
             print("[ERROR] No known faces loaded")
-            return "Unknown"
+            return None, None
 
         similarities = [
             np.dot(query_encoding, known) / (
@@ -84,109 +88,81 @@ class SimpleFacerec:
         best_match_index = np.argmax(similarities)
         best_score = similarities[best_match_index]
 
-        print(f"[DEBUG] Similarities: {similarities}")
-        print(f"[DEBUG] Best score: {best_score:.4f}")
-
         if best_score >= (1 - tolerance):
-            return self.known_face_names[best_match_index]
+            return self.known_face_data[best_match_index], best_score
         else:
-            return "Unknown"
+            return None, best_score
 
-def ensure_user_dir(username):
-    user_dir = os.path.join(IMAGES_BASE_DIR, username)
-    os.makedirs(user_dir, exist_ok=True)
-    return user_dir
 
-@app.route('/add_person', methods=['POST'])
-def add_person():
-    username = request.form.get('username')
-    person_name = request.form.get('person_name')
-    if not username or not person_name:
-        return jsonify({"error": "Username and person_name required"}), 400
-    
-    image = request.files.get('image')
-    if not image:
-        return jsonify({"error": "Image required"}), 400
-    
-    user_dir = ensure_user_dir(username)
-    
-    image_path = os.path.join(user_dir, f"{person_name}.jpg")
-    
-    if image.filename.lower().endswith(".webp"):
-        pil_image = Image.open(image.stream).convert("RGB")
-        pil_image.save(image_path)
-    else:
-        image.save(image_path)
-    
-    
-    return jsonify({
-        "success": True, 
-        "message": f"Image for {person_name} added to {username}'s folder",
-        "image_path": image_path
-    })
+@app.route('/')
+def home():
+    return render_template('index.html')
 
-@app.route('/delete_person', methods=['DELETE'])
-def delete_person():
-    username = request.form.get('username')  
-    person_name = request.form.get('person_name')
-    if not username or not person_name:
-        return jsonify({"error": "Username and person_name required"}), 400
-    
-    user_dir = os.path.join(IMAGES_BASE_DIR, username)
-    if not os.path.exists(user_dir):
-        return jsonify({"error": "User folder not found"}), 404
-    
-    image_path = os.path.join(user_dir, f"{person_name}.jpg")
-    if os.path.exists(image_path):
-        os.remove(image_path)
-        return jsonify({
-            "success": True, 
-            "message": f"Image for {person_name} deleted from {username}'s folder"
-        })
-    else:
-        return jsonify({"error": "Image not found"}), 404
 
 @app.route('/recognize', methods=['POST'])
 def recognize():
-    username = request.form.get('username')
-    if not username:
-        return jsonify({"error": "Username required"}), 400
-    
-    image = request.files.get('image')
-    if not image:
-        return jsonify({"error": "Image required"}), 400
+    members_str = request.form.get("members")
+    image_url = request.form.get("imageUrl")
 
-    user_dir = ensure_user_dir(username)
-    
+    if not members_str:
+        return jsonify({"error": "members field is required"}), 400
+    if not image_url:
+        return jsonify({"error": "imageUrl field is required"}), 400
 
-    temp_image_path = f"temp_{username}.jpg"
-    if image.filename.lower().endswith(".webp"):
-        pil_image = Image.open(image.stream).convert("RGB")
-        pil_image.save(temp_image_path)
-    else:
-        image.save(temp_image_path)
-        
+    import json
+    try:
+        members = json.loads(members_str)
+        if not isinstance(members, list):
+            raise ValueError("members must be a list")
+    except Exception as e:
+        return jsonify({"error": f"Invalid members JSON: {e}"}), 400
+
     sfr = SimpleFacerec()
-    sfr.load_encoding_images(user_dir)
 
-    match = sfr.match_image(temp_image_path, tolerance=0.45)
+    loaded_members = 0
+    for member in members:
+        if all(k in member for k in ("memberName", "memberImage", "memberRelation")):
+            if sfr.add_member(member):
+                loaded_members += 1
+        else:
+            print(f"[WARNING] Skipping incomplete member data: {member}")
 
-    os.remove(temp_image_path)
-    
-    if match == "Unknown":
+    if loaded_members == 0:
+        return jsonify({"error": "No valid member images loaded"}), 400
+
+    # Download test image from imageUrl
+    try:
+        resp = requests.get(image_url, stream=True, timeout=10)
+        resp.raise_for_status()
+        tmp_query_file = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        for chunk in resp.iter_content(chunk_size=8192):
+            tmp_query_file.write(chunk)
+        tmp_query_file.close()
+    except Exception as e:
+        return jsonify({"error": f"Could not download imageUrl: {e}"}), 400
+
+    matched_member, confidence = sfr.match_image(tmp_query_file.name)
+
+    os.remove(tmp_query_file.name)
+
+    if matched_member:
         return jsonify({
-            "match": match, 
-            "message": "No relation found",
-            "confidence": None  # Could add confidence if needed
+            "matchFound": True,
+            "memberName": matched_member["memberName"],
+            "memberRelation": matched_member["memberRelation"],
+            "memberImage": matched_member["memberImage"],
+            "confidence": float(confidence)
         })
     else:
         return jsonify({
-            "match": match, 
-            "message": f"Matched {match}",
-            "confidence": 0.85  # Placeholder; calculate actual best_score if needed
+            "matchFound": False,
+            "message": "No matches found",
+            "confidence": float(confidence) if confidence is not None else None
         })
+
 
 if __name__ == '__main__':
-    # Ensure base dir exists
-    os.makedirs(IMAGES_BASE_DIR, exist_ok=True)
     app.run(debug=True)
+
+#pip install flask numpy deepface pillow requests
+#pip install flask numpy deepface pillow requests
