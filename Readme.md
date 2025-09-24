@@ -1,1 +1,1 @@
-file:///C:/Users/mca/Downloads/doc.pdf
+pip install flask numpy deepface pillow requests

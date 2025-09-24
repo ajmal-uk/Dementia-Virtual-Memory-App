@@ -164,5 +164,3 @@ def recognize():
 if __name__ == '__main__':
     app.run(debug=True)
 
-#pip install flask numpy deepface pillow requests
-#pip install flask numpy deepface pillow requests
