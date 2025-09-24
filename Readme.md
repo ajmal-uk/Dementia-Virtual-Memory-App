@@ -1,1 +1,1 @@
-pip install flask numpy deepface pillow requests
+pip install flask numpy deepface pillow requests tf-keras
